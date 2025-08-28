@@ -2,19 +2,20 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="img-viewer",
-    version="1.0.0",
+    name="media-viewer",
+    version="2.0.0",
     packages=find_packages(),
     install_requires=[
         'Pillow>=9.0.0',
+        'opencv-python>=4.5.0',
     ],
     entry_points={
         'console_scripts': [
-            'img-viewer=img_viewer.cli:main',
+            'media-viewer=img_viewer.cli:main',
         ],
     },
     author="Your Name",
-    description="简单的图片目录查看工具",
+    description="支持图片/视频查看的多媒体工具",
     license="MIT",
-    keywords="image viewer",
+    keywords="media viewer image video",
 )
