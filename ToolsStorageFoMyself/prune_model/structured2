@@ -1,0 +1,139 @@
+import torch
+import torch.nn as nn
+import torch.nn.utils.prune as prune
+import torchvision.transforms as transforms
+from torchvision import datasets
+from torch.utils.data import DataLoader
+
+# 1. 定义AlexNet模型
+class AlexNet(nn.Module):
+    def __init__(self, num_classes=10, prune_channels=None):
+        super(AlexNet, self).__init__()
+        self.prune_channels = prune_channels
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=11, stride=4, padding=2),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=3, stride=2),
+            nn.Conv2d(64, 192, kernel_size=5, padding=2),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=3, stride=2),
+            nn.Conv2d(192, 384, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(384, 256, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=3, stride=2)
+        )
+        self.classifier = nn.Sequential(
+            nn.Linear(256 * 6 * 6, 4096),
+            nn.ReLU(inplace=True),
+            nn.Dropout(),
+            nn.Linear(4096, 4096),
+            nn.ReLU(inplace=True),
+            nn.Dropout(),
+            nn.Linear(4096, num_classes)
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        x = torch.flatten(x, 1)
+        x = self.classifier(x)
+        return x
+
+    def prune_conv(self, prune_percentage=0.2):
+        """
+        对卷积层进行结构化剪枝，删除整个卷积核（通道）而非零化权重
+        :param prune_percentage: 剪枝比例（剪去的卷积核比例）
+        """
+        for name, module in self.features.named_children():
+            if isinstance(module, nn.Conv2d):
+                # 获取每个卷积核的L1范数
+                weight = module.weight.data
+                l1_norm = torch.sum(torch.abs(weight), dim=(1, 2, 3))  # 每个卷积核的L1范数
+
+                # 根据L1范数剪去最小的卷积核
+                num_kernels_to_prune = int(prune_percentage * weight.shape[0])
+                _, prune_indices = torch.topk(l1_norm, num_kernels_to_prune, largest=False)
+
+                # 将选择的卷积核的权重设置为零
+                for idx in prune_indices:
+                    weight[idx] = 0  # 将卷积核权重置为零
+
+                # 保存剪枝后的卷积核（删除卷积核通道）
+                self.prune_channels[name] = prune_indices
+
+        return self
+
+# 2. 数据准备
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),  # 将MNIST图像调整为224x224
+    transforms.Grayscale(num_output_channels=3),  # 转换为3通道图像
+    transforms.ToTensor(),
+    transforms.Normalize((0.5,), (0.5,))
+])
+
+train_dataset = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
+train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+
+# 3. 模型初始化
+model = AlexNet(num_classes=10, prune_channels={})
+
+# 4. 训练模型
+def train_model(model, train_loader, criterion, optimizer, epochs=5):
+    for epoch in range(epochs):
+        for batch_idx, (data, target) in enumerate(train_loader):
+            optimizer.zero_grad()
+            output = model(data)
+            loss = criterion(output, target)
+            loss.backward()
+            optimizer.step()
+        print(f'Epoch {epoch+1}, Loss: {loss.item():.4f}')
+
+train_model(model, train_loader, criterion, optimizer)
+
+# 5. 剪枝操作（删除通道/卷积核）
+model.prune_conv(prune_percentage=0.2)
+
+# 6. 保存剪枝前的模型
+def save_model(model, filename):
+    torch.save(model.state_dict(), filename)
+    print(f"Model saved to {filename}")
+
+# 7. 保存剪枝后的模型（移除无用通道）
+def save_pruned_model(model, filename):
+    # 需要移除剪枝后的卷积层通道
+    for name, module in model.features.named_children():
+        if isinstance(module, nn.Conv2d):
+            prune_indices = model.prune_channels.get(name, [])
+            if prune_indices:
+                # 移除剪掉的通道
+                weight = module.weight.data
+                weight = torch.index_select(weight, 0, torch.tensor([i for i in range(weight.shape[0]) if i not in prune_indices]))
+                module.weight.data = weight
+    torch.save(model.state_dict(), filename)
+    print(f"Pruned model saved to {filename}")
+
+# 8. 保存剪枝前模型
+save_model(model, 'alexnet_before_pruning.pth')
+
+# 9. 保存剪枝后模型（移除无用通道）
+save_pruned_model(model, 'alexnet_after_pruning.pth')
+
+# 10. 验证剪枝后模型
+def evaluate_model(model, test_loader):
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for data, target in test_loader:
+            outputs = model(data)
+            _, predicted = torch.max(outputs.data, 1)
+            total += target.size(0)
+            correct += (predicted == target).sum().item()
+    print(f'Accuracy after pruning: {100 * correct / total:.2f}%')
+
+# 11. 测试数据准备
+test_dataset = datasets.MNIST(root='./data', train=False, transform=transform)
+test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
+
+evaluate_model(model, test_loader)
